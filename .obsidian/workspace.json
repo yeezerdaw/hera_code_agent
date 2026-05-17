@@ -4,17 +4,21 @@
     "type": "split",
     "children": [
       {
-        "id": "8807bfdba332c580",
+        "id": "a7193a2a6bbdbaf0",
         "type": "tabs",
         "children": [
           {
-            "id": "5da51d90db1855c8",
+            "id": "69f29526d9ac5b5f",
             "type": "leaf",
             "state": {
-              "type": "graph",
-              "state": {},
-              "icon": "lucide-git-fork",
-              "title": "Graph view"
+              "type": "markdown",
+              "state": {
+                "file": "tests/eval/tasks/10_cross_file_refactor.md",
+                "mode": "source",
+                "source": false
+              },
+              "icon": "lucide-file",
+              "title": "10_cross_file_refactor"
             }
           }
         ]
@@ -90,6 +94,7 @@
             "state": {
               "type": "backlink",
               "state": {
+                "file": "tests/eval/tasks/10_cross_file_refactor.md",
                 "collapseAll": false,
                 "extraContext": false,
                 "sortOrder": "alphabetical",
@@ -99,7 +104,7 @@
                 "unlinkedCollapsed": true
               },
               "icon": "links-coming-in",
-              "title": "Backlinks"
+              "title": "Backlinks for 10_cross_file_refactor"
             }
           },
           {
@@ -108,11 +113,12 @@
             "state": {
               "type": "outgoing-link",
               "state": {
+                "file": "tests/eval/tasks/10_cross_file_refactor.md",
                 "linksCollapsed": false,
                 "unlinkedCollapsed": true
               },
               "icon": "links-going-out",
-              "title": "Outgoing links"
+              "title": "Outgoing links from 10_cross_file_refactor"
             }
           },
           {
@@ -150,13 +156,13 @@
             "state": {
               "type": "outline",
               "state": {
-                "file": "venv/lib/python3.14/site-packages/opentelemetry/sdk/_configuration/README.md",
+                "file": "tests/eval/tasks/10_cross_file_refactor.md",
                 "followCursor": false,
                 "showSearch": false,
                 "searchQuery": ""
               },
               "icon": "lucide-list",
-              "title": "Outline of README"
+              "title": "Outline of 10_cross_file_refactor"
             }
           }
         ]
@@ -178,6 +184,19 @@
   },
   "active": "d3bb76c6881b96ab",
   "lastOpenFiles": [
+    "walkthrough_antigravity/browser_integration_2026_05_17.md",
+    "__pycache__/llm_code_agent.cpython-314.pyc",
+    "__pycache__",
+    "walkthrough_antigravity/code_review_fixes_2026_05_17.md",
+    "walkthrough_antigravity/bug_fixes_2026_05_17.md",
+    "walkthrough_antigravity",
+    "tests/eval/tasks/07_debug_traceback.md",
+    "tests/eval/tasks/06_create_module.md",
+    "tests/eval/tasks/04_refactor_module.md",
+    "tests/eval/tasks/02_fix_bug.md",
+    "tests/eval/tasks/01_write_function.md",
+    "issues.md",
+    "venv/lib/python3.14/site-packages/opentelemetry/sdk/_configuration/README.md",
     "copilot.md",
     "README.md",
     "venv/lib/python3.14/site-packages/onnxruntime/tools/mobile_helpers/coreml_supported_mlprogram_ops.md",
@@ -186,7 +205,6 @@
     "presentation_script.md",
     "USER_MANUAL.md",
     "To - Do List (Hera Project - 17th May 2026).md",
-    "issues.md",
     "__pycache__/square.cpython-314.pyc",
     "__pycache__/cube.cpython-314.pyc"
   ]

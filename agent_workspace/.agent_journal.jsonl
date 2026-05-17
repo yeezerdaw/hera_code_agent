@@ -1,0 +1,10 @@
+{"type": "turn_start", "turn": 1, "user_input_preview": "\"Go to https://news.ycombinator.com, observe the page, and tell me the title of the top news story.\"", "ts": "2026-05-17T19:02:38.946+00:00"}
+{"type": "turn_start", "turn": 1, "user_input_preview": "\"Go to https://news.ycombinator.com, observe the page, and tell me the title of the top news story.\"", "ts": "2026-05-17T19:03:00.163+00:00"}
+{"type": "tool_call", "turn": 1, "name": "browser_navigate", "args_preview": {"url": "https://news.ycombinator.com"}, "ts_start": 22919.495685875, "ts": "2026-05-17T19:03:14.635+00:00"}
+{"type": "tool_result", "turn": 1, "name": "browser_navigate", "success": true, "healed": false, "suppressed": false, "latency_ms": 6804, "ts": "2026-05-17T19:03:21.440+00:00"}
+{"type": "turn_end", "turn": 1, "had_errors": false, "tool_count": 1, "observer_msg_len": 0, "ts": "2026-05-17T19:03:21.452+00:00"}
+{"type": "turn_start", "turn": 2, "user_input_preview": "\"Go to https://news.ycombinator.com, observe the page, and tell me the title of the top news story.\"", "ts": "2026-05-17T19:03:21.453+00:00"}
+{"type": "tool_call", "turn": 2, "name": "browser_observe", "args_preview": {}, "ts_start": 22929.977349208, "ts": "2026-05-17T19:03:25.117+00:00"}
+{"type": "tool_result", "turn": 2, "name": "browser_observe", "success": true, "healed": false, "suppressed": false, "latency_ms": 24, "ts": "2026-05-17T19:03:25.141+00:00"}
+{"type": "turn_end", "turn": 2, "had_errors": false, "tool_count": 1, "observer_msg_len": 0, "ts": "2026-05-17T19:03:25.143+00:00"}
+{"type": "turn_start", "turn": 3, "user_input_preview": "\"Go to https://news.ycombinator.com, observe the page, and tell me the title of the top news story.\"", "ts": "2026-05-17T19:03:25.143+00:00"}

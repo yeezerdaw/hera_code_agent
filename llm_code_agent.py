@@ -43,6 +43,8 @@ import re
 import shlex
 import shutil
 import subprocess
+import collections
+import hashlib
 import sys
 import tempfile
 import threading
@@ -86,6 +88,24 @@ except ImportError:
         "watchdog not installed — file watcher will use polling fallback. "
         "Run: pip install watchdog"
     )
+
+# ── OPTIONAL DEPENDENCY: playwright ──────────────────────────────────────────
+try:
+    from playwright.sync_api import sync_playwright
+    HAS_PLAYWRIGHT = True
+except ImportError:
+    HAS_PLAYWRIGHT = False
+    logging.getLogger(__name__).debug(
+        "playwright not installed — browser tools unavailable. "
+        "Run: pip install playwright && playwright install chromium"
+    )
+
+# ── OPTIONAL DEPENDENCY: html2text ───────────────────────────────────────────
+try:
+    import html2text as _html2text
+    HAS_HTML2TEXT = True
+except ImportError:
+    HAS_HTML2TEXT = False
 
 # ── CONSTANTS ────────────────────────────────────────────────────────────────
 OLLAMA_BASE = "http://localhost:11434"
@@ -144,6 +164,27 @@ SAFE_ENV_ALLOWLIST = {
 
 MEMORY_LOCK = threading.RLock()
 JOURNAL_LOCK = threading.Lock()
+BROWSER_LOCK = threading.RLock()
+
+# Lazy browser state — initialized on first browser tool call
+_browser_state: dict = {
+    "playwright": None,   # Playwright context manager
+    "browser": None,      # Browser instance
+    "page": None,         # Active Page
+    "headless": False,    # Default: visible. Overridden by --headless CLI flag.
+}
+
+class SafeFileLocks:
+    def __init__(self):
+        self._locks = {}
+        self._global_lock = threading.Lock()
+    def __getitem__(self, key):
+        with self._global_lock:
+            if key not in self._locks:
+                self._locks[key] = threading.Lock()
+            return self._locks[key]
+
+FILE_LOCKS = SafeFileLocks()
 logger = logging.getLogger(__name__)
 
 
@@ -458,8 +499,16 @@ class Display:
             return None
 
 
-# Global display — initialised in main()
-ui: Display = Display(use_rich=False)
+# Global display proxy
+class UIProxy:
+    def __init__(self):
+        self._instance = Display(use_rich=False)
+    def __getattr__(self, name):
+        return getattr(self._instance, name)
+    def set_instance(self, inst):
+        self._instance = inst
+
+ui: UIProxy = UIProxy()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -638,6 +687,55 @@ TOOLS = [
     },
 ]
 
+# ── BROWSER TOOL SCHEMAS (conditional) ───────────────────────────────────────
+if HAS_PLAYWRIGHT:
+    TOOLS.extend([
+        {
+            "type": "function",
+            "function": {
+                "name": "browser_navigate",
+                "description": "Navigate the browser to a URL. Returns page title on success.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "url": {"type": "string", "description": "Fully qualified URL (must include http:// or https://)."}
+                    },
+                    "required": ["url"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "browser_observe",
+                "description": "Get the current page content as structured Markdown. Optionally filter by a query string.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "Optional text to filter page content sections."}
+                    },
+                    "required": [],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "browser_interact",
+                "description": "Interact with a web page element. Actions: click, fill, press.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "action": {"type": "string", "enum": ["click", "fill", "press"], "description": "The interaction type."},
+                        "selector": {"type": "string", "description": "CSS selector, XPath, or Playwright text locator."},
+                        "value": {"type": "string", "description": "Text to type (fill) or key to press (press). Pass empty string for click."},
+                    },
+                    "required": ["action", "selector", "value"],
+                },
+            },
+        },
+    ])
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # §3  LOCAL TOOL IMPLEMENTATIONS
@@ -669,23 +767,31 @@ def tool_write_file(path: str, content: str, workdir: str) -> str:
     full = resolve(path, workdir)
     if full is None:
         return "ERROR: Path traversal outside working directory is not allowed."
-    try:
-        d = os.path.dirname(full)
-        if d:
-            os.makedirs(d, exist_ok=True)
-        # Atomic write via temp-file rename
-        with tempfile.NamedTemporaryFile(
-            "w", encoding="utf-8", dir=os.path.dirname(full) or workdir,
-            delete=False, suffix=".tmp"
-        ) as tmp:
-            tmp.write(content)
-            tmp.flush()
-            os.fsync(tmp.fileno())
-            tmp_path = tmp.name
-        os.replace(tmp_path, full)
-        return f"Written {len(content)} bytes → {full}"
-    except Exception as e:
-        return f"ERROR: {e}"
+    with FILE_LOCKS[full]:
+        tmp_path = ""
+        try:
+            d = os.path.dirname(full)
+            if d:
+                os.makedirs(d, exist_ok=True)
+            # Atomic write via temp-file rename
+            with tempfile.NamedTemporaryFile(
+                "w", encoding="utf-8", dir=os.path.dirname(full) or workdir,
+                delete=False, suffix=".tmp"
+            ) as tmp:
+                tmp.write(content)
+                tmp.flush()
+                os.fsync(tmp.fileno())
+                tmp_path = tmp.name
+            os.replace(tmp_path, full)
+            return f"Written {len(content)} bytes → {full}"
+        except Exception as e:
+            return f"ERROR: {e}"
+        finally:
+            if tmp_path and os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
 
 
 def tool_replace_in_file(path: str, old_content: str,
@@ -693,28 +799,36 @@ def tool_replace_in_file(path: str, old_content: str,
     full = resolve(path, workdir)
     if full is None:
         return "ERROR: Path traversal outside working directory is not allowed."
-    try:
-        with open(full, "r", encoding="utf-8") as f:
-            content = f.read()
-        if old_content not in content:
-            return (
-                "ERROR: old_content not found in the file. "
-                "Make sure you matched the existing string exactly."
-            )
-        updated = content.replace(old_content, new_content, 1)
-        # Atomic write
-        with tempfile.NamedTemporaryFile(
-            "w", encoding="utf-8", dir=os.path.dirname(full) or workdir,
-            delete=False, suffix=".tmp"
-        ) as tmp:
-            tmp.write(updated)
-            tmp.flush()
-            os.fsync(tmp.fileno())
-            tmp_path = tmp.name
-        os.replace(tmp_path, full)
-        return f"Successfully replaced content in {full}"
-    except Exception as e:
-        return f"ERROR: {e}"
+    with FILE_LOCKS[full]:
+        tmp_path = ""
+        try:
+            with open(full, "r", encoding="utf-8") as f:
+                content = f.read()
+            if old_content not in content:
+                return (
+                    "ERROR: old_content not found in the file. "
+                    "Make sure you matched the existing string exactly."
+                )
+            updated = content.replace(old_content, new_content, 1)
+            # Atomic write
+            with tempfile.NamedTemporaryFile(
+                "w", encoding="utf-8", dir=os.path.dirname(full) or workdir,
+                delete=False, suffix=".tmp"
+            ) as tmp:
+                tmp.write(updated)
+                tmp.flush()
+                os.fsync(tmp.fileno())
+                tmp_path = tmp.name
+            os.replace(tmp_path, full)
+            return f"Successfully replaced content in {full}"
+        except Exception as e:
+            return f"ERROR: {e}"
+        finally:
+            if tmp_path and os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
 
 
 def tool_edit_file(path: str, diff_block: str, workdir: str) -> str:
@@ -760,66 +874,72 @@ def tool_edit_file(path: str, diff_block: str, workdir: str) -> str:
     search_lines = search_text.split('\n')
     content_lines = content.split('\n')
     
-    # Attempt 1: Exact match
-    if search_text in content:
-        updated = content.replace(search_text, replace_text, 1)
-        return _atomic_write_and_confirm(full, updated, workdir, path)
-    
-    # Attempt 2: Fuzzy match (normalize whitespace)
-    def normalize(s: str) -> str:
-        # Collapse multiple whitespace, strip leading/trailing per line
-        lines = s.split('\n')
-        normalized_lines = []
-        for line in lines:
-            # Preserve empty lines for structure, normalize spacing
-            if line.strip():
-                normalized_lines.append(DIFF_FUZZY_NORMALIZE.sub(' ', line).strip())
-            else:
-                normalized_lines.append('')
-        return '\n'.join(normalized_lines)
-    
-    norm_search = normalize(search_text)
-    norm_content = normalize(content)
-    
-    if norm_search in norm_content:
-        # Find the actual substring in original that matches normalized
-        # Strategy: line-by-line sliding window
+    with FILE_LOCKS[full]:
+        # Attempt 1: Exact match
+        if search_text in content:
+            updated = content.replace(search_text, replace_text, 1)
+            return _atomic_write_and_confirm(full, updated, workdir, path)
+        
+        # Attempt 2: Fuzzy match (normalize whitespace)
+        def normalize(s: str) -> str:
+            # Collapse multiple whitespace, strip leading/trailing per line
+            lines = s.split('\n')
+            normalized_lines = []
+            for line in lines:
+                # Preserve empty lines for structure, normalize spacing
+                if line.strip():
+                    normalized_lines.append(DIFF_FUZZY_NORMALIZE.sub(' ', line).strip())
+                else:
+                    normalized_lines.append('')
+            return '\n'.join(normalized_lines)
+        
+        norm_search = normalize(search_text)
+        norm_content = normalize(content)
+        
+        warning_msg = ""
+        if path.endswith(('.py', '.yaml', '.yml')):
+            warning_msg = "\nWARNING: Fuzzy matching was used. For whitespace-sensitive files, this may have introduced indentation errors. Please verify the file structure."
+            
+        if norm_search in norm_content:
+            # Find the actual substring in original that matches normalized
+            # Strategy: line-by-line sliding window
+            for i in range(len(content_lines) - len(search_lines) + 1):
+                window = content_lines[i:i+len(search_lines)]
+                if normalize('\n'.join(window)) == norm_search:
+                    # Found match, reconstruct with replacement
+                    new_lines = (
+                        content_lines[:i] + 
+                        replace_text.split('\n') + 
+                        content_lines[i+len(search_lines):]
+                    )
+                    updated = '\n'.join(new_lines)
+                    return _atomic_write_and_confirm(full, updated, workdir, path) + warning_msg
+        
+        # Attempt 3: Line-stripped match (ignore all indentation)
+        stripped_search = '\n'.join(line.strip() for line in search_text.split('\n'))
         for i in range(len(content_lines) - len(search_lines) + 1):
             window = content_lines[i:i+len(search_lines)]
-            if normalize('\n'.join(window)) == norm_search:
-                # Found match, reconstruct with replacement
+            stripped_window = '\n'.join(line.strip() for line in window)
+            if stripped_window == stripped_search:
                 new_lines = (
                     content_lines[:i] + 
                     replace_text.split('\n') + 
                     content_lines[i+len(search_lines):]
                 )
                 updated = '\n'.join(new_lines)
-                return _atomic_write_and_confirm(full, updated, workdir, path)
-    
-    # Attempt 3: Line-stripped match (ignore all indentation)
-    stripped_search = '\n'.join(line.strip() for line in search_text.split('\n'))
-    for i in range(len(content_lines) - len(search_lines) + 1):
-        window = content_lines[i:i+len(search_lines)]
-        stripped_window = '\n'.join(line.strip() for line in window)
-        if stripped_window == stripped_search:
-            new_lines = (
-                content_lines[:i] + 
-                replace_text.split('\n') + 
-                content_lines[i+len(search_lines):]
-            )
-            updated = '\n'.join(new_lines)
-            return _atomic_write_and_confirm(full, updated, workdir, path)
-    
-    return (
-        f"ERROR: SEARCH block not found in {path}.\n"
-        f"Tried: exact match, fuzzy whitespace match, and stripped match.\n"
-        f"Hint: Read the file first to see exact content."
-    )
+                return _atomic_write_and_confirm(full, updated, workdir, path) + warning_msg
+        
+        return (
+            f"ERROR: SEARCH block not found in {path}.\n"
+            f"Tried: exact match, fuzzy whitespace match, and stripped match.\n"
+            f"Hint: Read the file first to see exact content."
+        )
 
 
 def _atomic_write_and_confirm(full_path: str, content: str, 
                                workdir: str, display_path: str) -> str:
     """Helper: atomic write with fsync."""
+    tmp_path = ""
     try:
         with tempfile.NamedTemporaryFile(
             "w", encoding="utf-8", 
@@ -835,6 +955,12 @@ def _atomic_write_and_confirm(full_path: str, content: str,
         return f"Successfully edited {display_path} ({len(content)} bytes)"
     except Exception as e:
         return f"ERROR: Write failed: {e}"
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
 
 
 def tool_list_files(path: str, workdir: str) -> str:
@@ -935,16 +1061,13 @@ def journal_append(workdir: str, event: dict) -> None:
     """Append one trajectory event as JSONL to the journal file."""
     payload = dict(event)
     payload["ts"] = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
-    line = (json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8")
+    line = json.dumps(payload, ensure_ascii=False) + "\n"
     path = os.path.join(workdir, JOURNAL_FILENAME)
 
     try:
         with JOURNAL_LOCK:
-            fd = os.open(path, os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o644)
-            try:
-                os.write(fd, line)
-            finally:
-                os.close(fd)
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(line)
     except Exception as e:
         logger.debug("journal append failed: %s", e)
 
@@ -959,6 +1082,161 @@ def read_scratchpad(workdir: str) -> str:
             return f.read()
     except Exception as e:
         return f"ERROR: {e}"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# §12  BROWSER TOOLS (playwright)
+# ══════════════════════════════════════════════════════════════════════════════
+
+BROWSER_TRUNCATE_LIMIT = 8000
+
+def _ensure_browser():
+    """Lazy-initialize the Playwright browser. Must be called under BROWSER_LOCK."""
+    if _browser_state["page"] is not None:
+        return
+    if not HAS_PLAYWRIGHT:
+        raise RuntimeError(
+            "Playwright is not installed. Run: pip install playwright && playwright install chromium"
+        )
+    pw = sync_playwright().start()
+    browser = pw.chromium.launch(headless=_browser_state["headless"])
+    page = browser.new_page()
+    _browser_state["playwright"] = pw
+    _browser_state["browser"] = browser
+    _browser_state["page"] = page
+    logger.info("Browser initialized (headless=%s)", _browser_state["headless"])
+
+
+def _teardown_browser():
+    """Explicitly close browser resources. Safe to call multiple times."""
+    with BROWSER_LOCK:
+        page = _browser_state.get("page")
+        browser = _browser_state.get("browser")
+        pw = _browser_state.get("playwright")
+        try:
+            if page:
+                page.close()
+        except Exception:
+            pass
+        try:
+            if browser:
+                browser.close()
+        except Exception:
+            pass
+        try:
+            if pw:
+                pw.stop()
+        except Exception:
+            pass
+        _browser_state["page"] = None
+        _browser_state["browser"] = None
+        _browser_state["playwright"] = None
+        logger.info("Browser teardown complete.")
+
+
+def _dom_to_markdown(html: str) -> str:
+    """Convert raw HTML to compact Markdown, stripping scripts/styles/svgs."""
+    # Strip noise tags
+    cleaned = re.sub(r'<(script|style|svg)[^>]*>.*?</\1>', '', html,
+                     flags=re.DOTALL | re.IGNORECASE)
+
+    if HAS_HTML2TEXT:
+        converter = _html2text.HTML2Text()
+        converter.ignore_links = False
+        converter.ignore_images = True
+        converter.body_width = 0  # no wrapping
+        converter.ignore_emphasis = False
+        md = converter.handle(cleaned)
+    else:
+        # Minimal fallback: strip all tags
+        md = re.sub(r'<[^>]+>', ' ', cleaned)
+        md = re.sub(r'\s+', ' ', md).strip()
+
+    # Hard truncation per FRD §2
+    if len(md) > BROWSER_TRUNCATE_LIMIT:
+        md = md[:BROWSER_TRUNCATE_LIMIT] + \
+             "\n\n...[TRUNCATED: Use specific queries to read further]"
+    return md
+
+
+def tool_browser_navigate(url: str) -> str:
+    """Navigate to a URL. Returns page title on success."""
+    with BROWSER_LOCK:
+        try:
+            _ensure_browser()
+            page = _browser_state["page"]
+            page.goto(url, timeout=15000, wait_until="domcontentloaded")
+            title = page.title() or "(no title)"
+            return f"Navigated to {title} at {page.url}"
+        except Exception as e:
+            err = str(e)
+            if "timeout" in err.lower():
+                return f"ERROR: timed out loading {url}"
+            return f"ERROR: {e}"
+
+
+def tool_browser_observe(query: str = "") -> str:
+    """Return the current page content as Markdown."""
+    with BROWSER_LOCK:
+        try:
+            _ensure_browser()
+            page = _browser_state["page"]
+            title = page.title() or "(no title)"
+            url = page.url
+            html = page.content()
+            md = _dom_to_markdown(html)
+
+            # Optional query filtering
+            if query:
+                lines = md.split("\n")
+                filtered = [l for l in lines if query.lower() in l.lower()]
+                if filtered:
+                    md = "\n".join(filtered)
+                else:
+                    md += f"\n\n(No sections matched query: '{query}')"
+
+            return f"Page: {title}\nURL: {url}\n\n{md}"
+        except Exception as e:
+            return f"ERROR: {e}"
+
+
+def tool_browser_interact(action: str, selector: str, value: str = "") -> str:
+    """Perform a click, fill, or press action on the page."""
+    valid_actions = {"click", "fill", "press"}
+    if action not in valid_actions:
+        return f"ERROR: Invalid action '{action}'. Must be one of: {valid_actions}"
+
+    with BROWSER_LOCK:
+        try:
+            _ensure_browser()
+            page = _browser_state["page"]
+            element = page.locator(selector)
+            element.wait_for(timeout=5000)
+
+            if action == "click":
+                element.click()
+            elif action == "fill":
+                element.fill(value)
+            elif action == "press":
+                element.press(value)
+
+            # Wait for re-renders (domcontentloaded — avoids networkidle
+            # failures on modern SPAs with analytics/websocket polling)
+            try:
+                page.wait_for_load_state("domcontentloaded", timeout=10000)
+            except Exception:
+                pass  # Best-effort wait; don't fail the interaction
+
+            return f"Successfully performed {action} on {selector}"
+        except Exception as e:
+            err = str(e)
+            if "not found" in err.lower() or "timeout" in err.lower():
+                return (
+                    f"ERROR: Selector not found. "
+                    f"Call browser_observe to analyze the current DOM "
+                    f"structure before retrying."
+                )
+            return f"ERROR: Element {selector} not interactable: {e}"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1042,7 +1320,9 @@ def tool_remember(key: str, value: str) -> str:
         if col is not None:
             try:
                 # Upsert by deterministic ID derived from key
-                mem_id = f"mem_{abs(hash(key)) % (10**9)}"
+                mem_id = f"mem_{hashlib.md5(key.encode()).hexdigest()[:16]}"
+                # NOTE: Existing memories stored under the old hash()-based IDs will become
+                # orphaned. This is a one-time migration edge case.
                 col.upsert(
                     ids=[mem_id],
                     documents=[doc],
@@ -1417,6 +1697,14 @@ def dispatch_tool(name: str, args: dict, workdir: str) -> tuple[str, bool]:
         return tool_scratchpad(
             args["content"], args.get("mode", "append"), workdir
         ), True
+    elif name == "browser_navigate":
+        return tool_browser_navigate(args["url"]), False
+    elif name == "browser_observe":
+        return tool_browser_observe(args.get("query", "")), False
+    elif name == "browser_interact":
+        return tool_browser_interact(
+            args["action"], args["selector"], args.get("value", "")
+        ), False
     return f"ERROR: Unknown tool '{name}'", False
 
 
@@ -1900,6 +2188,17 @@ Available tools:
   remember        — Save a fact/preference to semantic memory (persists across sessions).
   recall          — Retrieve semantically relevant memories by natural language query.
   scratchpad      — Write PRIVATE reasoning/planning. Never shown to user or in history.
+"""
+
+# Conditionally append browser tool docs to system prompt
+if HAS_PLAYWRIGHT:
+    SYSTEM_PROMPT += """\
+  browser_navigate — Navigate to a URL and load the page.
+  browser_observe  — Read the current page as structured Markdown.
+  browser_interact — Click, fill, or press on page elements.
+"""
+
+SYSTEM_PROMPT += """\
 
 Rules:
 1. MANDATORY: Before calling two or more tools in sequence, you MUST first call
@@ -1917,6 +2216,15 @@ Rules:
 9. Use recall with a relevant query before starting a task to surface useful context.
 """
 
+if HAS_PLAYWRIGHT:
+    SYSTEM_PROMPT += """\
+
+Browser Rules:
+10. After calling browser_navigate, ALWAYS call browser_observe to understand the page.
+11. Use browser_observe output to identify CSS selectors — never guess selectors.
+12. If browser_interact fails, call browser_observe to re-analyze the DOM before retrying.
+"""
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # §7b  CONVERSATION SUMMARISATION
@@ -1926,7 +2234,11 @@ def maybe_summarise(model: str, messages: list, turn: int,
                     summarise_every: int,
                     keep_recent_messages: int,
                     display: Display) -> list:
-    if turn % summarise_every != 0 or turn == 0:
+    if turn == 0:
+        return messages
+    total_chars = sum(len(str(m.get("content", ""))) for m in messages)
+    should_summarise = (turn % summarise_every == 0) or (total_chars >= 30000)
+    if not should_summarise:
         return messages
     if len(messages) < keep_recent_messages + 4:
         return messages
@@ -2522,6 +2834,10 @@ def main():
         help="Watch workdir for external file changes and notify the agent.",
     )
     parser.add_argument("--no-rich", action="store_true", dest="no_rich")
+    parser.add_argument(
+        "--headless", action="store_true",
+        help="Run browser in headless mode (default: visible).",
+    )
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--debug", action="store_true")
     parser.add_argument(
@@ -2554,7 +2870,10 @@ def main():
     )
 
     use_rich = HAS_RICH and not args.no_rich
-    ui = Display(use_rich=use_rich)
+    ui.set_instance(Display(use_rich=use_rich))
+
+    # Wire browser headless flag
+    _browser_state["headless"] = args.headless
 
     if args.eval:
         eval_script = Path(__file__).resolve().parent / "tests" / "eval" / "run_evals.py"
@@ -2677,6 +2996,7 @@ def main():
         # In task mode, exit after completion (CI-friendly)
         if watcher_handle:
             stop_watcher(watcher_handle)
+        _teardown_browser()
         return
 
     # ── Interactive REPL ─────────────────────────────────────────────────
@@ -2731,6 +3051,7 @@ def main():
 
     if watcher_handle:
         stop_watcher(watcher_handle)
+    _teardown_browser()
 
 
 if __name__ == "__main__":
