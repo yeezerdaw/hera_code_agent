@@ -1,4 +1,4 @@
-# LLM Code Agent
+# Hera
 
 A lightweight, terminal-based AI coding assistant inspired by Claude Code. It runs 100% locally on your machine using [Ollama](https://ollama.com/), providing an interactive REPL where the AI can read, write, and execute code within a safe workspace environment.
 

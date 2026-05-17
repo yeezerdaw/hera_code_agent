@@ -1,0 +1,124 @@
+{
+  "generated_at": "2026-04-14T08:45:47Z",
+  "model": "llama-3.3-70b-versatile",
+  "backend": "groq",
+  "summary": {
+    "total": 10,
+    "passed": 0,
+    "pass_rate": 0.0,
+    "errors": 0,
+    "avg_turns": 1.0
+  },
+  "results": [
+    {
+      "task": "01",
+      "task_name": "01_write_function",
+      "passed": false,
+      "duration": 1.4976494169968646,
+      "turns": 1,
+      "tool_calls": 0,
+      "errors": 0,
+      "heals": 0,
+      "fail_reason": "DONE.md missing"
+    },
+    {
+      "task": "02",
+      "task_name": "02_fix_bug",
+      "passed": false,
+      "duration": 0.2034898330020951,
+      "turns": 1,
+      "tool_calls": 0,
+      "errors": 0,
+      "heals": 0,
+      "fail_reason": "DONE.md missing"
+    },
+    {
+      "task": "03",
+      "task_name": "03_add_tests",
+      "passed": false,
+      "duration": 0.23140287499700207,
+      "turns": 1,
+      "tool_calls": 0,
+      "errors": 0,
+      "heals": 0,
+      "fail_reason": "DONE.md missing"
+    },
+    {
+      "task": "04",
+      "task_name": "04_refactor_module",
+      "passed": false,
+      "duration": 0.31281412500538863,
+      "turns": 1,
+      "tool_calls": 0,
+      "errors": 0,
+      "heals": 0,
+      "fail_reason": "DONE.md missing"
+    },
+    {
+      "task": "05",
+      "task_name": "05_find_and_edit",
+      "passed": false,
+      "duration": 0.20503300000564195,
+      "turns": 1,
+      "tool_calls": 0,
+      "errors": 0,
+      "heals": 0,
+      "fail_reason": "DONE.md missing"
+    },
+    {
+      "task": "06",
+      "task_name": "06_create_module",
+      "passed": false,
+      "duration": 0.15999741600535344,
+      "turns": 1,
+      "tool_calls": 0,
+      "errors": 0,
+      "heals": 0,
+      "fail_reason": "DONE.md missing"
+    },
+    {
+      "task": "07",
+      "task_name": "07_debug_traceback",
+      "passed": false,
+      "duration": 0.17460837500402704,
+      "turns": 1,
+      "tool_calls": 0,
+      "errors": 0,
+      "heals": 0,
+      "fail_reason": "DONE.md missing"
+    },
+    {
+      "task": "08",
+      "task_name": "08_write_dataclass",
+      "passed": false,
+      "duration": 0.1494902499980526,
+      "turns": 1,
+      "tool_calls": 0,
+      "errors": 0,
+      "heals": 0,
+      "fail_reason": "DONE.md missing"
+    },
+    {
+      "task": "09",
+      "task_name": "09_add_type_hints",
+      "passed": false,
+      "duration": 0.15440600000147242,
+      "turns": 1,
+      "tool_calls": 0,
+      "errors": 0,
+      "heals": 0,
+      "fail_reason": "DONE.md missing"
+    },
+    {
+      "task": "10",
+      "task_name": "10_cross_file_refactor",
+      "passed": false,
+      "duration": 0.14177641599962953,
+      "turns": 1,
+      "tool_calls": 0,
+      "errors": 0,
+      "heals": 0,
+      "fail_reason": "DONE.md missing"
+    }
+  ]
+}

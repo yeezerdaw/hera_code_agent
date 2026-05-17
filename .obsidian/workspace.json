@@ -1,0 +1,207 @@
+{
+  "main": {
+    "id": "9c4a2041edf81884",
+    "type": "split",
+    "children": [
+      {
+        "id": "8807bfdba332c580",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "5da51d90db1855c8",
+            "type": "leaf",
+            "state": {
+              "type": "markdown",
+              "state": {
+                "file": "README.md",
+                "mode": "source",
+                "source": false
+              },
+              "icon": "lucide-file",
+              "title": "README"
+            }
+          },
+          {
+            "id": "80bfc135bc489169",
+            "type": "leaf",
+            "state": {
+              "type": "markdown",
+              "state": {
+                "file": "To - Do List (Hera Project - 17th May 2026).md",
+                "mode": "source",
+                "source": false
+              },
+              "icon": "lucide-file",
+              "title": "To - Do List (Hera Project - 17th May 2026)"
+            }
+          }
+        ],
+        "currentTab": 1
+      }
+    ],
+    "direction": "vertical"
+  },
+  "left": {
+    "id": "bfb0f6e3663ac363",
+    "type": "split",
+    "children": [
+      {
+        "id": "76c8ee5287addff4",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "d3bb76c6881b96ab",
+            "type": "leaf",
+            "state": {
+              "type": "file-explorer",
+              "state": {
+                "sortOrder": "alphabetical",
+                "autoReveal": false
+              },
+              "icon": "lucide-folder-closed",
+              "title": "Files"
+            }
+          },
+          {
+            "id": "f05575265accfb0f",
+            "type": "leaf",
+            "state": {
+              "type": "search",
+              "state": {
+                "query": "",
+                "matchingCase": false,
+                "explainSearch": false,
+                "collapseAll": false,
+                "extraContext": false,
+                "sortOrder": "alphabetical"
+              },
+              "icon": "lucide-search",
+              "title": "Search"
+            }
+          },
+          {
+            "id": "faace5981d5bd70c",
+            "type": "leaf",
+            "state": {
+              "type": "bookmarks",
+              "state": {},
+              "icon": "lucide-bookmark",
+              "title": "Bookmarks"
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "horizontal",
+    "width": 300
+  },
+  "right": {
+    "id": "a5ae56bbf1955245",
+    "type": "split",
+    "children": [
+      {
+        "id": "a81e823b4671eca8",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "ded9b9c9093e79cf",
+            "type": "leaf",
+            "state": {
+              "type": "backlink",
+              "state": {
+                "file": "To - Do List (Hera Project - 17th May 2026).md",
+                "collapseAll": false,
+                "extraContext": false,
+                "sortOrder": "alphabetical",
+                "showSearch": false,
+                "searchQuery": "",
+                "backlinkCollapsed": false,
+                "unlinkedCollapsed": true
+              },
+              "icon": "links-coming-in",
+              "title": "Backlinks for To - Do List (Hera Project - 17th May 2026)"
+            }
+          },
+          {
+            "id": "7d3fa67a861268b9",
+            "type": "leaf",
+            "state": {
+              "type": "outgoing-link",
+              "state": {
+                "file": "To - Do List (Hera Project - 17th May 2026).md",
+                "linksCollapsed": false,
+                "unlinkedCollapsed": true
+              },
+              "icon": "links-going-out",
+              "title": "Outgoing links from To - Do List (Hera Project - 17th May 2026)"
+            }
+          },
+          {
+            "id": "e690eee5e354e383",
+            "type": "leaf",
+            "state": {
+              "type": "tag",
+              "state": {
+                "sortOrder": "frequency",
+                "useHierarchy": true,
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-tags",
+              "title": "Tags"
+            }
+          },
+          {
+            "id": "2a0e7b166b15edb5",
+            "type": "leaf",
+            "state": {
+              "type": "all-properties",
+              "state": {
+                "sortOrder": "frequency",
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-archive",
+              "title": "All properties"
+            }
+          },
+          {
+            "id": "2376da8e3871d218",
+            "type": "leaf",
+            "state": {
+              "type": "outline",
+              "state": {
+                "file": "To - Do List (Hera Project - 17th May 2026).md",
+                "followCursor": false,
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-list",
+              "title": "Outline of To - Do List (Hera Project - 17th May 2026)"
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "horizontal",
+    "width": 300,
+    "collapsed": true
+  },
+  "left-ribbon": {
+    "hiddenItems": {
+      "switcher:Open quick switcher": false,
+      "graph:Open graph view": false,
+      "canvas:Create new canvas": false,
+      "daily-notes:Open today's daily note": false,
+      "templates:Insert template": false,
+      "command-palette:Open command palette": false,
+      "bases:Create new base": false
+    }
+  },
+  "active": "80bfc135bc489169",
+  "lastOpenFiles": [
+    "README.md",
+    "To - Do List (Hera Project - 17th May 2026).md",
+    "presentation_script.md"
+  ]
+}
