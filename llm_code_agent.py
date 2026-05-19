@@ -120,6 +120,8 @@ MAX_TURNS_DEFAULT = 15
 DEFAULT_SUMMARISE_EVERY = 5
 DEFAULT_SUMMARY_KEEP_MESSAGES = 6
 CONTEXT_CHAR_LIMIT = 2000
+LARGE_CONTEXT_LIMIT = 8000
+LARGE_CONTEXT_TOOLS = {"read_symbol", "search_codebase", "read_file"}
 DISPLAY_CHAR_LIMIT = 500
 SELF_HEAL_MAX_SEARCH_DEPTH = 5
 SCRATCHPAD_FILENAME = ".agent_scratchpad.md"
@@ -140,7 +142,7 @@ WATCH_IGNORE_NAMES = {
     SCRATCHPAD_FILENAME, DONE_FILENAME, "__pycache__",
     ".git", ".venv", "memory.json", JOURNAL_FILENAME,
 }
-WATCH_IGNORE_SUFFIXES = {".pyc", ".pyo", ".swp", ".swo", ".tmp"}
+WATCH_IGNORE_SUFFIXES = {".pyc", ".pyo", ".swp", ".swo", ".tmp", ".jsonl"}
 
 # Command prefixes
 SAFE_COMMAND_PREFIXES = {
@@ -201,6 +203,14 @@ class AgentConfig:
     summarise_every: int = DEFAULT_SUMMARISE_EVERY
     summary_keep_messages: int = DEFAULT_SUMMARY_KEEP_MESSAGES
 
+@dataclass
+class AgentContext:
+    backend: 'LLMBackend'
+    model: str
+    workdir: str
+    config: AgentConfig
+    watcher_queue: queue.Queue | None = None
+    preferred_test_framework: str = "pytest"
 
 @dataclass
 class WatcherEvent:
@@ -520,14 +530,48 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "read_file",
-            "description": "Read the contents of a file from the working directory.",
+            "description": "Read the contents of a file with optional pagination to avoid context limits.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "path": {"type": "string",
-                             "description": "Relative path from the working directory."}
+                             "description": "Relative path from the working directory."},
+                    "start_line": {"type": "integer",
+                                   "description": "Optional: 1-indexed line number to start reading from."},
+                    "end_line": {"type": "integer",
+                                 "description": "Optional: 1-indexed line number to stop reading at."}
                 },
                 "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_symbol",
+            "description": "Extracts the exact source code of a specified Python class or function natively.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Path to the Python file."},
+                    "symbol_name": {"type": "string", "description": "The exact name of the function or class to extract."}
+                },
+                "required": ["path", "symbol_name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_codebase",
+            "description": "Stateless literal and regex search tool to discover where symbols or keywords live. Narrow the path to a specific file when the target file is known.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "The keyword or regex pattern to search for."},
+                    "path": {"type": "string", "description": "A specific directory or file to limit the search. Defaults to '.'."}
+                },
+                "required": ["query"],
             },
         },
     },
@@ -750,17 +794,104 @@ def resolve(path: str, workdir: str) -> str | None:
     return full
 
 
-def tool_read_file(path: str, workdir: str) -> str:
+def tool_read_file(path: str, workdir: str, start_line: int | None = None, end_line: int | None = None) -> str:
     full = resolve(path, workdir)
     if full is None:
         return "ERROR: Path traversal outside working directory is not allowed."
     try:
         with open(full, "r", encoding="utf-8") as f:
-            return f.read()
+            lines = f.read().splitlines(keepends=True)
+            if start_line is not None or end_line is not None:
+                start = max(1, start_line) if start_line is not None else 1
+                end = min(len(lines), end_line) if end_line is not None else len(lines)
+                if start > len(lines):
+                    return f"ERROR: start_line {start} is greater than file length ({len(lines)} lines)."
+                
+                sliced_lines = lines[start - 1 : end]
+                result = f"--- Read {path} (Lines {start}-{end}) ---\n" + "".join(sliced_lines)
+                return result
+            return "".join(lines)
     except FileNotFoundError:
         return f"ERROR: File not found: {path}"
     except Exception as e:
         return f"ERROR: {e}"
+
+import ast
+
+def tool_read_symbol(path: str, symbol_name: str, workdir: str) -> str:
+    full = resolve(path, workdir)
+    if full is None:
+        return "ERROR: Path traversal outside working directory is not allowed."
+    if not os.path.exists(full):
+        return f"ERROR: File not found: {path}"
+    
+    try:
+        # We read the raw string for ast.get_source_segment
+        with open(full, "r", encoding="utf-8") as f:
+            source = f.read()
+    except Exception as e:
+        return f"ERROR: Could not read file: {e}"
+
+    try:
+        tree = ast.parse(source, filename=full)
+    except SyntaxError:
+        return f"ERROR: Syntax error in file {path}. AST parsing failed. Use read_file with start_line/end_line instead."
+
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            if node.name == symbol_name:
+                segment = ast.get_source_segment(source, node)
+                if segment is not None:
+                    return f"--- Found {symbol_name} (Lines {node.lineno}-{node.end_lineno}) ---\n{segment}"
+                else:
+                    # Fallback to line-slice extraction
+                    lines = source.splitlines(keepends=True)
+                    start = getattr(node, 'lineno', 1)
+                    end = getattr(node, 'end_lineno', len(lines))
+                    segment = "".join(lines[start - 1 : end])
+                    return f"--- Found {symbol_name} (Lines {start}-{end}) ---\n{segment}"
+                    
+    return f"ERROR: Symbol '{symbol_name}' not found in {path}. Use search_codebase to find the correct name."
+
+def tool_search_codebase(query: str, path: str, workdir: str) -> str:
+    import re
+    full_path = resolve(path, workdir) if path and path != "." else workdir
+    if full_path is None:
+        return "ERROR: Path traversal restricted."
+    
+    ignore_names = {".venv", ".git", "__pycache__", "node_modules"}
+    ignore_suffixes = {".pyc", ".png", ".jpg", ".jpeg", ".gif", ".ico", ".db", ".sqlite"}
+    
+    matches = []
+    line_count = 0
+    
+    try:
+        if os.path.isfile(full_path):
+            files_to_scan = [full_path]
+        else:
+            files_to_scan = []
+            for root, dirs, files in os.walk(full_path):
+                dirs[:] = [d for d in dirs if d not in ignore_names]
+                for file in files:
+                    if not any(file.endswith(s) for s in ignore_suffixes):
+                        files_to_scan.append(os.path.join(root, file))
+                        
+        for fpath in files_to_scan:
+            try:
+                with open(fpath, "r", encoding="utf-8", errors="ignore") as f:
+                    for idx, line in enumerate(f, 1):
+                        if re.search(query, line):
+                            rel_path = os.path.relpath(fpath, workdir)
+                            matches.append(f"{rel_path}: Line {idx}: {line.strip()}")
+                            line_count += 1
+                            if line_count >= 50:
+                                return "\n".join(matches) + "\n[Results truncated at 50 hits. Narrow your query.]"
+            except Exception:
+                continue
+                
+        return "\n".join(matches) if matches else "No matches found."
+    except Exception as e:
+        return f"ERROR: Search failed: {e}"
 
 
 def tool_write_file(path: str, content: str, workdir: str) -> str:
@@ -1088,7 +1219,7 @@ def read_scratchpad(workdir: str) -> str:
 # §12  BROWSER TOOLS (playwright)
 # ══════════════════════════════════════════════════════════════════════════════
 
-BROWSER_TRUNCATE_LIMIT = 8000
+BROWSER_TRUNCATE_LIMIT = 32000
 
 def _ensure_browser():
     """Lazy-initialize the Playwright browser. Must be called under BROWSER_LOCK."""
@@ -1665,47 +1796,60 @@ def dispatch_tool(name: str, args: dict, workdir: str) -> tuple[str, bool]:
     suppress=True means the result should never be appended to conversation
     history (used for the scratchpad tool).
     """
-    if name == "read_file":
-        return tool_read_file(args["path"], workdir), False
-    elif name == "write_file":
-        return tool_write_file(args["path"], args["content"], workdir), False
-    elif name == "replace_in_file":
-        return tool_replace_in_file(
-            args["path"], args["old_content"], args["new_content"], workdir
-        ), False
-    elif name == "edit_file":
-        return tool_edit_file(args["path"], args["diff_block"], workdir), False
-    elif name == "list_files":
-        return tool_list_files(args.get("path", "."), workdir), False
-    elif name == "run_command":
-        preclassified = None
-        if all(k in args for k in ("_cmd_level", "_cmd_reason", "_cmd_argv")):
-            preclassified = (args["_cmd_level"], args["_cmd_reason"], args["_cmd_argv"])
-        return tool_run_command(
-            args["command"],
-            args.get("timeout", 60),
-            workdir,
-            approved=bool(args.get("_approved", False)),
-            preclassified=preclassified,
-        ), False
-    elif name == "remember":
-        return tool_remember(args["key"], args["value"]), False
-    elif name == "recall":
-        return tool_recall(args.get("query", "")), False
-    elif name == "scratchpad":
-        # suppress=True: result is never injected into conversation history
-        return tool_scratchpad(
-            args["content"], args.get("mode", "append"), workdir
-        ), True
-    elif name == "browser_navigate":
-        return tool_browser_navigate(args["url"]), False
-    elif name == "browser_observe":
-        return tool_browser_observe(args.get("query", "")), False
-    elif name == "browser_interact":
-        return tool_browser_interact(
-            args["action"], args["selector"], args.get("value", "")
-        ), False
-    return f"ERROR: Unknown tool '{name}'", False
+    try:
+        if name == "read_file":
+            return tool_read_file(
+                args["path"], workdir, 
+                start_line=args.get("start_line"), 
+                end_line=args.get("end_line")
+            ), False
+        elif name == "read_symbol":
+            return tool_read_symbol(args["path"], args["symbol_name"], workdir), False
+        elif name == "search_codebase":
+            return tool_search_codebase(args["query"], args.get("path", "."), workdir), False
+        elif name == "write_file":
+            return tool_write_file(args["path"], args["content"], workdir), False
+        elif name == "replace_in_file":
+            return tool_replace_in_file(
+                args["path"], args["old_content"], args["new_content"], workdir
+            ), False
+        elif name == "edit_file":
+            return tool_edit_file(args["path"], args["diff_block"], workdir), False
+        elif name == "list_files":
+            return tool_list_files(args.get("path", "."), workdir), False
+        elif name == "run_command":
+            preclassified = None
+            if all(k in args for k in ("_cmd_level", "_cmd_reason", "_cmd_argv")):
+                preclassified = (args["_cmd_level"], args["_cmd_reason"], args["_cmd_argv"])
+            return tool_run_command(
+                args["command"],
+                args.get("timeout", 60),
+                workdir,
+                approved=bool(args.get("_approved", False)),
+                preclassified=preclassified,
+            ), False
+        elif name == "remember":
+            return tool_remember(args["key"], args["value"]), False
+        elif name == "recall":
+            return tool_recall(args.get("query", "")), False
+        elif name == "scratchpad":
+            # suppress=True: result is never injected into conversation history
+            return tool_scratchpad(
+                args["content"], args.get("mode", "append"), workdir
+            ), True
+        elif name == "browser_navigate":
+            return tool_browser_navigate(args["url"]), False
+        elif name == "browser_observe":
+            return tool_browser_observe(args.get("query", "")), False
+        elif name == "browser_interact":
+            return tool_browser_interact(
+                args["action"], args["selector"], args.get("value", "")
+            ), False
+        
+        return f"ERROR: Unknown tool '{name}'", False
+        
+    except KeyError as e:
+        return f"ERROR: Tool '{name}' is missing required argument {e}. Please include it and try again.", False
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2157,17 +2301,21 @@ def _infer_provider_name(url: str) -> str:
     return "openai-compat"
 
 
-# ── Module-level backend instance (set in main(), used everywhere) ───────────
-_backend: LLMBackend = OllamaBackend()
-
+# ── Global Context Container ─────────────────────────────────────────────────
+_ctx: AgentContext = AgentContext(
+    backend=OllamaBackend(),
+    model="gemma4:e2b",
+    workdir="agent_workspace",
+    config=AgentConfig(approval=False, max_turns=15, auto_test=False)
+)
 
 def chat_llm(model: str, messages: list, use_tools: bool = True) -> dict:
-    """Single call-site wrapper used throughout the agent."""
-    return _backend.chat(model, messages, use_tools)
-
+    """Wrapper using the active context backend."""
+    return _ctx.backend.chat(_ctx.model, messages, use_tools)
 
 def list_available_models() -> list[str]:
-    return _backend.list_models()
+    """Wrapper using the active context backend."""
+    return _ctx.backend.list_models()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2180,7 +2328,9 @@ You have a sandboxed working directory where you can read/write files and run
 shell commands.
 
 Available tools:
-  read_file       — Read a file's contents.
+  read_file       — Read a file's contents with optional pagination.
+  read_symbol     — Extract the exact source code of a specified Python class or function natively.
+  search_codebase — Search the codebase using literal or regex queries.
   write_file      — Write or overwrite a file (parent dirs auto-created).
   replace_in_file — Surgically replace a specific string in a file.
   list_files      — List files and directories at a given path.
@@ -2205,24 +2355,31 @@ Rules:
     `scratchpad` with your full step-by-step plan: what each tool will do, what
     success looks like, and what you will do if a step fails. Do not skip this.
 2. Always use tools — never just describe what to do.
-3. For file edits: use `edit_file` with diff block for multi-line changes, 
+3. CONTEXT LIMITS: Do NOT use `read_file` without line numbers on large files.
+4. DISCOVERY PIPELINE: When modifying a specific function, first use `search_codebase` to find it, then use `read_symbol` to extract its exact code. Only use `edit_file` after reading the exact code.
+5. FALLBACK EXECUTION: If `read_symbol` fails due to syntax errors, use `read_file` with `start_line` and `end_line` based on the coordinates found in `search_codebase`.
+6. For file edits: use `edit_file` with diff block for multi-line changes, 
    `replace_in_file` for single-line substitutions, `write_file` only for 
    new files. Always read the file before editing if unsure of contents.
-4. Read command output and fix errors automatically — do not give up easily.
-5. Stay within the working directory.
-6. Never ask the user to run commands manually.
-7. Use remember to store user preferences you discover.
-8. When writing Python files, consider whether a test file is appropriate.
-9. Use recall with a relevant query before starting a task to surface useful context.
+7. Read command output and fix errors automatically — do not give up easily.
+8. Stay within the working directory.
+9. Never ask the user to run commands manually.
+10. Use remember to store user preferences you discover.
+11. When writing Python files, consider whether a test file is appropriate.
+12. Use recall with a relevant query before starting a task to surface useful context.
 """
 
 if HAS_PLAYWRIGHT:
     SYSTEM_PROMPT += """\
 
-Browser Rules:
-10. After calling browser_navigate, ALWAYS call browser_observe to understand the page.
-11. Use browser_observe output to identify CSS selectors — never guess selectors.
-12. If browser_interact fails, call browser_observe to re-analyze the DOM before retrying.
+Browser Rules (Selector Cheat-Sheet):
+10. You have full permission and capability to interact dynamically with the live web page. NEVER say "As an AI, I cannot interact with a browser." You have the tools; use them!
+11. STRICT MODE ENFORCED: Never use generic/broad CSS locators like `a`, `button`, or `input` as they trigger strict-mode violation errors in Playwright. You MUST use unique Playwright locators ONLY.
+12. Examples of valid strict locators:
+    - Exact text match: `text="Exact String"` or `text="Submit"`
+    - Semantic elements with text: `button:has-text("Ask")` or `a:has-text("Login")`
+    - Aria labels/attributes: `[aria-label="Search"]` or `input[name="q"]`
+13. If browser_interact fails due to a resolution or selector error, YOU MUST call browser_observe to re-analyze the LIVE DOM before ever attempting another interaction.
 """
 
 
@@ -2397,6 +2554,18 @@ def run_agent(model: str, user_input: str, messages: list,
             ui.assistant(text_content)
 
         if not tool_calls:
+            import re as _re
+            if text_content:
+                tool_name_pattern = _re.compile(r'"name"\s*:\s*"(\w+)"')
+                if tool_name_pattern.search(text_content):
+                    ui.warning("Model output raw JSON instead of a tool call — nudging.")
+                    messages.append({"role": "assistant", "content": text_content})
+                    messages.append({
+                        "role": "system",
+                        "content": "[Observer] You printed a tool call as text instead of executing it. Use the actual tool call mechanism — do not print JSON. Re-plan and execute."
+                    })
+                    continue  # back to top of turn loop, don't break
+
             messages.append({"role": "assistant", "content": text_content})
             if task_mode:
                 summary = _extract_done_summary(messages)
@@ -2540,10 +2709,11 @@ def run_agent(model: str, user_input: str, messages: list,
 
         # 2e. Append tool results (scratchpad results already filtered out)
         for _fn, result, _healed in all_results:
+            limit = LARGE_CONTEXT_LIMIT if _fn in LARGE_CONTEXT_TOOLS else CONTEXT_CHAR_LIMIT
             ctx = (
-                result if len(result) <= CONTEXT_CHAR_LIMIT
-                else result[:CONTEXT_CHAR_LIMIT]
-                + "\n...[TRUNCATED] Use head/grep to see more"
+                result if len(result) <= limit
+                else result[:limit]
+                + "\n...[TRUNCATED] Use read_file with start_line/end_line to see more"
             )
             messages.append({"role": "tool", "content": ctx})
 
@@ -2636,14 +2806,38 @@ def _split_into_sections(source: str, chars_per_chunk: int = 6000) -> list[str]:
     chunks: list[str] = []
     current_start = 0
 
-    for boundary in boundaries[1:]:
-        # Would adding up to this boundary exceed our limit?
-        if boundary - current_start >= chars_per_chunk:
-            # Flush what we have so far
-            chunk = source[current_start:boundary].strip()
+    # Handle plain text with no def/class boundaries
+    if len(boundaries) == 1:
+        pos = 0
+        while pos < len(source):
+            slice_end = min(pos + chars_per_chunk, len(source))
+            if slice_end < len(source):
+                nl = source.rfind('\n', pos, slice_end)
+                if nl > pos:
+                    slice_end = nl + 1
+            chunk = source[pos:slice_end].strip()
             if chunk:
                 chunks.append(chunk)
-            current_start = boundary
+            pos = slice_end
+        return chunks or [source]
+
+    for boundary in boundaries[1:]:
+        if boundary - current_start <= chars_per_chunk:
+            continue
+
+        pos = current_start
+        while pos < boundary:
+            slice_end = min(pos + chars_per_chunk, boundary)
+            if slice_end < boundary:
+                nl = source.rfind('\n', pos, slice_end)
+                if nl > pos:
+                    slice_end = nl + 1
+            chunk = source[pos:slice_end].strip()
+            if chunk:
+                chunks.append(chunk)
+            pos = slice_end
+
+        current_start = boundary
 
     # Flush the final remainder
     tail = source[current_start:].strip()
@@ -2671,11 +2865,24 @@ def run_selfreview(model: str):
     ui.info(f"Source: {lines} lines, {len(source):,} chars")
 
     review_system = (
-        "You are a senior Python code reviewer. Analyse the following "
-        "code for bugs, anti-patterns, security issues, and improvement "
-        "suggestions. Be specific. Cite approximate line numbers where "
-        "possible. Format as a bulleted list grouped by severity: "
-        "Critical / Warning / Info. If a section has no issues, say so briefly."
+        "You are a senior Python code reviewer reviewing a chunk of a large "
+        "Python file. Your job is to find *actionable* bugs, security holes, "
+        "and concrete anti-patterns. Do NOT list stylistic preferences, "
+        "missing docstrings, obvious design trade-offs, or theoretical risks "
+        "that are not exploitable in this context.\n\n"
+        "Rules:\n"
+        "1. Only flag issues that would cause a crash, data loss, security "
+        "breach, or silent wrong behaviour. Skip 'could be better' suggestions.\n"
+        "2. If a bare except: is present, flag it ONLY if it swallows a specific "
+        "exception that should be handled or re-raised.\n"
+        "3. Do NOT complain about: hardcoded localhost URLs, missing input "
+        "validation on internal constants, lack of URL validation on config strings, "
+        "magic numbers under 10, or 'potential' issues you cannot demonstrate.\n"
+        "4. Cite the exact or approximate line number for every finding.\n"
+        "5. If this chunk has no actionable issues, output exactly: "
+        "'No actionable issues found in this chunk.' and nothing else.\n\n"
+        "Format as a bulleted list grouped by severity: "
+        "Critical / Warning / Info. Max 5 bullets per chunk."
     )
 
     chunks = _split_into_sections(source, chars_per_chunk=6000)
@@ -2686,7 +2893,7 @@ def run_selfreview(model: str):
     # Estimate tokens per chunk to decide inter-chunk pacing.
     # Groq free tier: 12k TPM for llama-3.3-70b.  ~4 chars ≈ 1 token.
     # We pause between chunks when using an OpenAI-compat backend.
-    is_rate_limited_backend = isinstance(_backend, OpenAICompatibleBackend)
+    is_rate_limited_backend = isinstance(_ctx.backend, OpenAICompatibleBackend)
     avg_chunk_tokens = sum(len(c) for c in chunks) // max(len(chunks), 1) // 4
 
     for i, chunk in enumerate(chunks, 1):
@@ -2733,9 +2940,17 @@ def run_selfreview(model: str):
                 "content": (
                     "You are a senior Python code reviewer. You have reviewed a "
                     "large codebase in chunks. Below are the per-chunk reviews. "
-                    "Produce a single consolidated report: de-duplicate findings, "
-                    "promote the most critical issues to the top, and group by "
-                    "severity (Critical / Warning / Info). Be concise."
+                    "Produce a single consolidated report.\n\n"
+                    "Rules:\n"
+                    "1. De-duplicate: if the same issue appears in multiple chunks, list it once.\n"
+                    "2. Remove any finding that is vague, theoretical, or not demonstrably "
+                    "exploitable in this codebase.\n"
+                    "3. Remove complaints about: missing docstrings, magic numbers, "
+                    "hardcoded config URLs, or 'could be refactored' suggestions.\n"
+                    "4. Group by severity: Critical (crash/data loss/security), "
+                    "Warning (reliability issue), Info (minor cleanup). "
+                    "If a severity has no items, omit the heading entirely.\n"
+                    "5. Max 10 items total. Be concise — one sentence per finding."
                 ),
             },
             {"role": "user", "content": combined[:12000]},
@@ -2911,8 +3126,9 @@ def main():
     api_base = args.api_base or os.environ.get("HERA_API_BASE", "")
     backend_type = args.backend or os.environ.get("HERA_BACKEND", "auto")
 
-    global _backend
-    _backend = make_backend(backend_type, api_base, api_key)
+    global _ctx
+    _ctx.backend = make_backend(backend_type, api_base, api_key)
+    _ctx.model = args.model
 
     model = args.model
     workdir = os.path.realpath(args.workdir)
@@ -2944,7 +3160,7 @@ def main():
     else:
         ui.warning("Could not list models from backend.")
 
-    ui.info(f"Backend: {_backend.display_name()}")
+    ui.info(f"Backend: {_ctx.backend.display_name()}")
     ui.info(f"Model  : {model}")
     ui.info(f"Workdir: {workdir}")
 
